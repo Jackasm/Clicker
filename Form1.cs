@@ -16,20 +16,97 @@ namespace Clicker
         private string _url;
         private bool _isRunning;
         private const int PORT = 5000;
+        private string _currentToken;
+        private PictureBox _pictureBox;
+        private Button _refreshButton;
 
         public Form1()
         {
             InitializeComponent();
             this.FormClosing += MainForm_FormClosing;
-            
+            this.MaximizeBox = false;
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            System.Reflection.Assembly assembly = System.Reflection.Assembly.GetExecutingAssembly();
+            using (System.IO.Stream stream = assembly.GetManifestResourceStream("Clicker.icon.ico"))
+            {
+                if (stream != null)
+                {
+                    this.Icon = new Icon(stream);
+                }
+            }
+
+            // Генерируем начальный токен
+            _currentToken = GenerateRandomToken();
+
             // Проверяем и добавляем правило брандмауэра
             if (!IsFirewallRuleSet())
             {
                 AddFirewallRule();
             }
-            
+
             StartServer();
-            ShowQRCode();
+            InitializeUI();
+        }
+
+        private void InitializeUI()
+        {
+            // Настройка PictureBox для QR-кода
+            _pictureBox = new PictureBox
+            {
+                SizeMode = PictureBoxSizeMode.StretchImage,
+                Dock = DockStyle.Fill
+            };
+
+            // Кнопка обновления
+            _refreshButton = new Button
+            {
+                Text = "Обновить код",
+                Dock = DockStyle.Bottom,
+                Height = 40,
+                Font = new Font("Arial", 10)
+            };
+            _refreshButton.Click += RefreshButton_Click;
+
+            // Добавляем элементы на форму
+            this.Controls.Add(_pictureBox);
+            this.Controls.Add(_refreshButton);
+
+            // Генерируем и показываем QR-код
+            UpdateQRCode();
+
+            this.Text = $"Clicker - {_url}";
+            this.Size = new Size(400, 500);
+            this.StartPosition = FormStartPosition.CenterScreen;
+        }
+
+        private void RefreshButton_Click(object sender, EventArgs e)
+        {
+            _currentToken = GenerateRandomToken();
+            UpdateQRCode();
+            
+        }
+
+        private string GenerateRandomToken()
+        {
+            var random = new Random();
+            return random.Next(100000, 999999).ToString(); // 6-значный код
+        }
+
+        private void UpdateQRCode()
+        {
+            try
+            {
+                string urlWithToken = $"{_url}?token={_currentToken}";
+                QRCodeGenerator qrGenerator = new QRCodeGenerator();
+                QRCodeData qrData = qrGenerator.CreateQrCode(urlWithToken, QRCodeGenerator.ECCLevel.Q);
+                QRCode qrCode = new QRCode(qrData);
+                Bitmap qrImage = qrCode.GetGraphic(20);
+                _pictureBox.Image = qrImage;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка генерации QR-кода: {ex.Message}");
+            }
         }
 
         private bool IsFirewallRuleSet()
@@ -41,7 +118,7 @@ namespace Clicker
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = "netsh",
-                        Arguments = "advfirewall firewall show rule name=\"Presentation Remote\"",
+                        Arguments = "advfirewall firewall show rule name=\"Clicker (Presentation Remote)\"",
                         RedirectStandardOutput = true,
                         UseShellExecute = false,
                         CreateNoWindow = true
@@ -49,7 +126,7 @@ namespace Clicker
                 };
                 process.Start();
                 string output = process.StandardOutput.ReadToEnd();
-                return output.Contains("Presentation Remote");
+                return output.Contains("Clicker (Presentation Remote)");
             }
             catch
             {
@@ -61,22 +138,14 @@ namespace Clicker
         {
             try
             {
-                if (!IsAdministrator())
-                {
-                    MessageBox.Show("Для добавления правила брандмауэра требуются права администратора. " +
-                                   "Пожалуйста, запустите программу от имени администратора.", 
-                                   "Требуются права администратора", 
-                                   MessageBoxButtons.OK, 
-                                   MessageBoxIcon.Warning);
-                    return;
-                }
+                
 
                 var process = new Process
                 {
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = "netsh",
-                        Arguments = $"advfirewall firewall add rule name=\"Presentation Remote\" dir=in action=allow protocol=TCP localport={PORT}",
+                        Arguments = $"advfirewall firewall add rule name=\"Clicker (Presentation Remote)\" dir=in action=allow protocol=TCP localport={PORT}",
                         Verb = "runas",
                         UseShellExecute = true,
                         CreateNoWindow = true
@@ -91,12 +160,7 @@ namespace Clicker
             }
         }
 
-        private bool IsAdministrator()
-        {
-            WindowsIdentity identity = WindowsIdentity.GetCurrent();
-            WindowsPrincipal principal = new WindowsPrincipal(identity);
-            return principal.IsInRole(WindowsBuiltInRole.Administrator);
-        }
+        
 
         private void StartServer()
         {
@@ -124,32 +188,7 @@ namespace Clicker
         }
 
 
-        private void ShowQRCode()
-        {
-            try
-            {
-                QRCodeGenerator qrGenerator = new QRCodeGenerator();
-                QRCodeData qrData = qrGenerator.CreateQrCode(_url, QRCodeGenerator.ECCLevel.Q);
-                QRCode qrCode = new QRCode(qrData);
-                Bitmap qrImage = qrCode.GetGraphic(20);
-
-                var pictureBox = new PictureBox
-                {
-                    Image = qrImage,
-                    SizeMode = PictureBoxSizeMode.StretchImage,
-                    Dock = DockStyle.Fill
-                };
-
-                this.Text = $"Presentation Remote - {_url}";
-                this.Controls.Add(pictureBox);
-                this.Size = new Size(400, 400);
-                this.StartPosition = FormStartPosition.CenterScreen;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Ошибка генерации QR-кода: {ex.Message}");
-            }
-        }
+        
 
         private string GetLocalIPAddress()
         {
@@ -196,6 +235,14 @@ namespace Clicker
                 var request = context.Request;
                 var response = context.Response;
 
+                // Проверяем токен безопасности
+                string token = request.QueryString["token"];
+                if (string.IsNullOrEmpty(token) || token != _currentToken)
+                {
+                    SendEmptyResponse(response, 403); // Forbidden
+                    return;
+                }
+
                 if (request.Url.AbsolutePath == "/control")
                 {
                     SendHtmlResponse(response, GetHTMLPage());
@@ -221,6 +268,7 @@ namespace Clicker
             }
         }
 
+
         private void SendHtmlResponse(HttpListenerResponse response, string html)
         {
             byte[] buffer = System.Text.Encoding.UTF8.GetBytes(html);
@@ -241,18 +289,12 @@ namespace Clicker
             {
                 switch (key)
                 {
-                    case "right":
-                        SendKeys.SendWait("{RIGHT}");
+                    case "down":
+                        SendKeys.SendWait("{DOWN}");
                         break;
-                    case "left":
-                        SendKeys.SendWait("{LEFT}");
-                        break;
-                    case "f5":
-                        SendKeys.SendWait("{F5}");
-                        break;
-                    case "esc":
-                        SendKeys.SendWait("{ESC}");
-                        break;
+                    case "up":
+                        SendKeys.SendWait("{UP}");
+                        break;                    
                 }
             }
             catch (Exception ex)
@@ -288,40 +330,32 @@ namespace Clicker
 
         private string GetHTMLPage()
         {
-            return @"
+            return $@"
 <!DOCTYPE html>
 <html>
 <head>
     <title>Presentation Remote</title>
     <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
+    <meta charset=""utf-8"">
     <style>
-        * {
+        * {{
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-        }
+        }}
         
-        body {
+        body {{
             font-family: Arial, sans-serif;
             height: 100vh;
             display: flex;
             flex-direction: column;
             background-color: #f5f5f5;
-        }
+        }}
         
-        .control-panel {
-            display: flex;
-            height: 50vh;
-            gap: 5px;
-            padding: 5px;
-        }
-        
-        .nav-button {
+        .nav-button {{
             flex: 1;
             font-size: 24px;
             border: none;
-            border-radius: 10px;
-            background-color: #4CAF50;
             color: white;
             cursor: pointer;
             display: flex;
@@ -329,77 +363,46 @@ namespace Clicker
             justify-content: center;
             transition: all 0.2s;
             user-select: none;
-        }
+            width: 100%;
+            padding: 20px;
+        }}
         
-        .nav-button:active {
+        .nav-button:active {{
             transform: scale(0.98);
             box-shadow: inset 0 0 10px rgba(0,0,0,0.3);
-        }
+        }}
         
-        #prev-btn {
-            background-color: #2196F3;
-        }
-        
-        #next-btn {
+        #next-btn {{
             background-color: #4CAF50;
-        }
-        
-        #start-btn {
             height: 50vh;
-            margin: 5px;
-            border-radius: 10px;
-            font-size: 24px;
-            background-color: #f44336;
-        }
+        }}
         
-        #stop-btn {
-            height: 15vh;
-            margin: 5px;
-            border-radius: 10px;
-            font-size: 18px;
-            background-color: #607D8B;
-            display: none;
-        }
+        #prev-btn {{
+            background-color: #2196F3;
+            height: 50vh;
+        }}
         
-        @media (max-width: 600px) {
-            .nav-button, #start-btn {
+        @media (max-width: 600px) {{
+            .nav-button {{
                 font-size: 18px;
-            }
-        }
+            }}
+        }}
     </style>
 </head>
 <body>
-    <div class=""control-panel"">
-        <button id=""prev-btn"" class=""nav-button"" onclick=""sendKey('left')"">
-            Previous
-        </button>
-        <button id=""next-btn"" class=""nav-button"" onclick=""sendKey('right')"">
-            Next
-        </button>
-    </div>
-    <button id=""start-btn"" onclick=""sendKey('f5')"">Start Presentation (F5)</button>
-    <button id=""stop-btn"" onclick=""sendKey('esc')"">Stop Presentation (ESC)</button>
+    <button id=""next-btn"" class=""nav-button"" onclick=""sendKey('down')"">
+        Следующий слайд
+    </button>
+    <button id=""prev-btn"" class=""nav-button"" onclick=""sendKey('up')"">
+        Предыдущий слайд
+    </button>
 
     <script>
-        let isPresenting = false;
-        const startBtn = document.getElementById('start-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        
-        function sendKey(key) {
-            if (key === 'f5') {
-                isPresenting = true;
-                startBtn.style.display = 'none';
-                stopBtn.style.display = 'block';
-            } else if (key === 'esc') {
-                isPresenting = false;
-                startBtn.style.display = 'block';
-                stopBtn.style.display = 'none';
-            }
-            
-            fetch(`/keypress?key=${key}`)
+        function sendKey(key) {{
+            fetch(`/keypress?key=${{key}}&token={_currentToken}`)
                 .then(response => console.log('Key sent:', key))
                 .catch(err => console.error('Error:', err));
-        }
+        }}
     </script>
 </body>
 </html>";
