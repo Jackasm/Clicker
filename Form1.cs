@@ -1,9 +1,11 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Net;
 using System.Threading;
 using System.Windows.Forms;
 using QRCoder;
 using System.Drawing;
+using System.Security.Principal;
 
 namespace Clicker
 {
@@ -12,117 +14,275 @@ namespace Clicker
         private HttpListener _listener;
         private Thread _serverThread;
         private string _url;
+        private bool _isRunning;
+        private const int PORT = 5000;
 
         public Form1()
         {
             InitializeComponent();
+            this.FormClosing += MainForm_FormClosing;
+            
+            // Проверяем и добавляем правило брандмауэра
+            if (!IsFirewallRuleSet())
+            {
+                AddFirewallRule();
+            }
+            
             StartServer();
             ShowQRCode();
         }
 
+        private bool IsFirewallRuleSet()
+        {
+            try
+            {
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "netsh",
+                        Arguments = "advfirewall firewall show rule name=\"Presentation Remote\"",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                return output.Contains("Presentation Remote");
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void AddFirewallRule()
+        {
+            try
+            {
+                if (!IsAdministrator())
+                {
+                    MessageBox.Show("Для добавления правила брандмауэра требуются права администратора. " +
+                                   "Пожалуйста, запустите программу от имени администратора.", 
+                                   "Требуются права администратора", 
+                                   MessageBoxButtons.OK, 
+                                   MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "netsh",
+                        Arguments = $"advfirewall firewall add rule name=\"Presentation Remote\" dir=in action=allow protocol=TCP localport={PORT}",
+                        Verb = "runas",
+                        UseShellExecute = true,
+                        CreateNoWindow = true
+                    }
+                };
+                process.Start();
+                process.WaitForExit(2000);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Ошибка добавления правила брандмауэра: {ex.Message}");
+            }
+        }
+
+        private bool IsAdministrator()
+        {
+            WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
         private void StartServer()
         {
-            // Получаем локальный IP-адрес
-            string ip = GetLocalIPAddress();
-            _url = $"http://{ip}:5000/control";
+            try
+            {
+                string ip = GetLocalIPAddress();
+                _url = $"http://{ip}:{PORT}/control";
 
-            // Запускаем HTTP-сервер в отдельном потоке
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://*:5000/");
-            _listener.Start();
+                _listener = new HttpListener();
+                _listener.Prefixes.Add($"http://*:{PORT}/");
+                _listener.Start();
 
-            _serverThread = new Thread(ListenForRequests);
-            _serverThread.Start();
+                _isRunning = true;
+                _serverThread = new Thread(ListenForRequests)
+                {
+                    IsBackground = true
+                };
+                _serverThread.Start();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка запуска сервера: {ex.Message}");
+                this.Close();
+            }
         }
+
 
         private void ShowQRCode()
         {
-            // Генерируем QR-код с URL
-            QRCodeGenerator qrGenerator = new QRCodeGenerator();
-            QRCodeData qrData = qrGenerator.CreateQrCode(_url, QRCodeGenerator.ECCLevel.Q);
-            QRCode qrCode = new QRCode(qrData);
-            Bitmap qrImage = qrCode.GetGraphic(20);
-
-            // Отображаем QR-код в PictureBox
-            var pictureBox = new PictureBox
+            try
             {
-                Image = qrImage,
-                SizeMode = PictureBoxSizeMode.StretchImage,
-                Dock = DockStyle.Fill
-            };
+                QRCodeGenerator qrGenerator = new QRCodeGenerator();
+                QRCodeData qrData = qrGenerator.CreateQrCode(_url, QRCodeGenerator.ECCLevel.Q);
+                QRCode qrCode = new QRCode(qrData);
+                Bitmap qrImage = qrCode.GetGraphic(20);
 
-            this.Text = "Presentation Remote - Scan QR Code";
-            this.Controls.Add(pictureBox);
-            this.Size = new Size(400, 400);
+                var pictureBox = new PictureBox
+                {
+                    Image = qrImage,
+                    SizeMode = PictureBoxSizeMode.StretchImage,
+                    Dock = DockStyle.Fill
+                };
+
+                this.Text = $"Presentation Remote - {_url}";
+                this.Controls.Add(pictureBox);
+                this.Size = new Size(400, 400);
+                this.StartPosition = FormStartPosition.CenterScreen;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка генерации QR-кода: {ex.Message}");
+            }
         }
 
         private string GetLocalIPAddress()
         {
-            var host = Dns.GetHostEntry(Dns.GetHostName());
-            foreach (var ip in host.AddressList)
+            try
             {
-                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                var host = Dns.GetHostEntry(Dns.GetHostName());
+                foreach (var ip in host.AddressList)
                 {
-                    return ip.ToString();
+                    if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    {
+                        return ip.ToString();
+                    }
                 }
+                return "127.0.0.1"; // Возвращаем localhost если не нашли IP
             }
-            throw new Exception("No network adapters with IPv4 address");
+            catch
+            {
+                return "127.0.0.1";
+            }
         }
 
         private void ListenForRequests()
         {
-            while (_listener.IsListening)
+            while (_isRunning)
             {
-                var context = _listener.GetContext();
-                ProcessRequest(context);
+                try
+                {
+                    var context = _listener.GetContext();
+                    ThreadPool.QueueUserWorkItem(ProcessRequest, context);
+                }
+                catch (HttpListenerException) { /* Игнорируем ошибки при остановке */ }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Ошибка в ListenForRequests: {ex.Message}");
+                }
             }
         }
 
-        private void ProcessRequest(HttpListenerContext context)
+        private void ProcessRequest(object state)
         {
-            var request = context.Request;
-            var response = context.Response;
-
-            if (request.Url.AbsolutePath == "/control")
+            var context = (HttpListenerContext)state;
+            try
             {
-                // Отдаём HTML-страницу с кнопками
-                string html = GetHTMLPage();
-                byte[] buffer = System.Text.Encoding.UTF8.GetBytes(html);
+                var request = context.Request;
+                var response = context.Response;
 
-                response.ContentType = "text/html";
-                response.ContentLength64 = buffer.Length;
-                response.OutputStream.Write(buffer, 0, buffer.Length);
+                if (request.Url.AbsolutePath == "/control")
+                {
+                    SendHtmlResponse(response, GetHTMLPage());
+                }
+                else if (request.Url.AbsolutePath == "/keypress")
+                {
+                    string key = request.QueryString["key"];
+                    this.Invoke((MethodInvoker)delegate { SendKeyPress(key); });
+                    SendEmptyResponse(response, 200);
+                }
+                else
+                {
+                    SendEmptyResponse(response, 404);
+                }
             }
-            else if (request.Url.AbsolutePath == "/keypress")
+            catch (Exception ex)
             {
-                // Обработка нажатий (например, /keypress?key=right)
-                string key = request.QueryString["key"];
-                SendKeyPress(key);
+                Debug.WriteLine($"Ошибка обработки запроса: {ex.Message}");
+            }
+            finally
+            {
+                context.Response.Close();
+            }
+        }
 
-                response.StatusCode = 200;
-                response.Close();
-            }
-            else
-            {
-                response.StatusCode = 404;
-                response.Close();
-            }
+        private void SendHtmlResponse(HttpListenerResponse response, string html)
+        {
+            byte[] buffer = System.Text.Encoding.UTF8.GetBytes(html);
+            response.ContentType = "text/html";
+            response.ContentLength64 = buffer.Length;
+            response.OutputStream.Write(buffer, 0, buffer.Length);
+        }
+
+        private void SendEmptyResponse(HttpListenerResponse response, int statusCode)
+        {
+            response.StatusCode = statusCode;
+            response.ContentLength64 = 0;
         }
 
         private void SendKeyPress(string key)
         {
-            // Используем SendWait вместо Send
-            switch (key)
+            try
             {
-                case "right":
-                    SendKeys.SendWait("{RIGHT}");
-                    break;
-                case "left":
-                    SendKeys.SendWait("{LEFT}");
-                    break;
-                case "f5":
-                    SendKeys.SendWait("{F5}");
-                    break;
+                switch (key)
+                {
+                    case "right":
+                        SendKeys.SendWait("{RIGHT}");
+                        break;
+                    case "left":
+                        SendKeys.SendWait("{LEFT}");
+                        break;
+                    case "f5":
+                        SendKeys.SendWait("{F5}");
+                        break;
+                    case "esc":
+                        SendKeys.SendWait("{ESC}");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Ошибка отправки клавиши: {ex.Message}");
+            }
+        }
+
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            try
+            {
+                _isRunning = false;
+
+                if (_listener != null && _listener.IsListening)
+                {
+                    _listener.Stop();
+                }
+
+                if (_serverThread != null && _serverThread.IsAlive)
+                {
+                    if (!_serverThread.Join(1000))
+                    {
+                        _serverThread.Abort();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Ошибка при закрытии: {ex.Message}");
             }
         }
 
@@ -135,74 +295,107 @@ namespace Clicker
     <title>Presentation Remote</title>
     <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
     <style>
-        body {
-            font-family: Arial, sans-serif;
+        * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
             height: 100vh;
             display: flex;
             flex-direction: column;
+            background-color: #f5f5f5;
         }
         
-        .top-row {
+        .control-panel {
             display: flex;
             height: 50vh;
+            gap: 5px;
+            padding: 5px;
         }
         
         .nav-button {
             flex: 1;
-            font-size: 10vw;
+            font-size: 24px;
             border: none;
+            border-radius: 10px;
             background-color: #4CAF50;
             color: white;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: background-color 0.3s;
+            transition: all 0.2s;
+            user-select: none;
         }
         
-        .nav-button:hover {
-            background-color: #45a049;
+        .nav-button:active {
+            transform: scale(0.98);
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.3);
         }
         
         #prev-btn {
-            margin-right: 2px;
+            background-color: #2196F3;
         }
         
         #next-btn {
-            margin-left: 2px;
+            background-color: #4CAF50;
         }
         
         #start-btn {
             height: 50vh;
-            width: 100%;
-            font-size: 8vw;
+            margin: 5px;
+            border-radius: 10px;
+            font-size: 24px;
             background-color: #f44336;
         }
         
-        #start-btn:hover {
-            background-color: #d32f2f;
+        #stop-btn {
+            height: 15vh;
+            margin: 5px;
+            border-radius: 10px;
+            font-size: 18px;
+            background-color: #607D8B;
+            display: none;
         }
         
-        .arrow {
-            font-size: 15vw;
+        @media (max-width: 600px) {
+            .nav-button, #start-btn {
+                font-size: 18px;
+            }
         }
     </style>
 </head>
 <body>
-    <div class=""top-row"">
+    <div class=""control-panel"">
         <button id=""prev-btn"" class=""nav-button"" onclick=""sendKey('left')"">
-            <span class=""arrow"">Prev</span>
+            Previous
         </button>
         <button id=""next-btn"" class=""nav-button"" onclick=""sendKey('right')"">
-            <span class=""arrow"">Next</span>
+            Next
         </button>
     </div>
-    <button id=""start-btn"" onclick=""sendKey('f5')"">START PRESENTATION (F5)</button>
+    <button id=""start-btn"" onclick=""sendKey('f5')"">Start Presentation (F5)</button>
+    <button id=""stop-btn"" onclick=""sendKey('esc')"">Stop Presentation (ESC)</button>
 
     <script>
+        let isPresenting = false;
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        
         function sendKey(key) {
+            if (key === 'f5') {
+                isPresenting = true;
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'block';
+            } else if (key === 'esc') {
+                isPresenting = false;
+                startBtn.style.display = 'block';
+                stopBtn.style.display = 'none';
+            }
+            
             fetch(`/keypress?key=${key}`)
                 .then(response => console.log('Key sent:', key))
                 .catch(err => console.error('Error:', err));
@@ -210,13 +403,6 @@ namespace Clicker
     </script>
 </body>
 </html>";
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            _listener.Stop();
-            _serverThread.Join();
-            base.OnFormClosing(e);
         }
     }
 }
